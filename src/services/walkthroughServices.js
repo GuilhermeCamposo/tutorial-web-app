@@ -40,108 +40,8 @@ const DEFAULT_SERVICE_INSTANCE = {
 
 // OpenShift 4 equivalent of #prepareCustomWalkthroughNamespace
 const prepareWalkthroughV4 = (dispatch, walkthroughName, attrs = {}) => {
-  if (window.OPENSHIFT_CONFIG.mockData) {
     dispatch(initCustomThreadSuccess({}));
     return Promise.resolve([]);
-  }
-  dispatch(initCustomThreadPending());
-  return (
-    initCustomThread(walkthroughName)
-      .then(manifestResp => manifestResp.data)
-      .then(manifest => {
-        dispatch(initCustomThreadPending(manifest));
-        return currentUser().then(u => [u, manifest]);
-      })
-      // Handle walkthrough namespace actions.
-      .then(([user, manifest]) => {
-        console.log(`reconciling walkthrough namespace for walkthrough ${walkthroughName}`);
-        const namespaceName = buildValidProjectNamespaceName(user.username, walkthroughName);
-        const namespaceDisplay = buildValidNamespaceDisplayName(user.username, walkthroughName);
-        const namespace = namespaceResource({ name: namespaceName });
-        const namespaceReq = namespaceRequestResource(namespaceDisplay, { name: namespaceName });
-
-        const compareFn = n => n.metadata.name === namespaceName;
-        return findOrCreateOpenshiftResource(
-          namespaceDef,
-          namespace,
-          compareFn,
-          namespaceRequestDef,
-          namespaceReq
-        ).then(n => [user, manifest, n]);
-      })
-      // Handle watching OpenShift routes.
-      .then(([user, manifest, walkthroughNS]) =>
-        poll(routeDef(walkthroughNS.metadata.name))
-          .then(listener => {
-            listener.onEvent(route => {
-              route.kind = KIND_ROUTE;
-              dispatch(addWalkthroughService(walkthroughName, route));
-            });
-          })
-          .then(() => [user, manifest, walkthroughNS])
-      )
-      // Handle shared namespace actions.
-      .then(([user, manifest, walkthroughNs]) => {
-        console.log(`reconciling shared namespace for walkthrough ${walkthroughName}`);
-        if (!manifest || !manifest.dependencies || !manifest.dependencies.managedServices) {
-          return Promise.resolve([]);
-        }
-
-        console.log(`using manifest for walkthrough ${walkthroughName}`, manifest);
-
-        const provisionNamespaceInfo = {
-          name: getUsersSharedNamespaceName(user.username),
-          displayName: getUsersSharedNamespaceDisplayName(user.username)
-        };
-        const provisionTasks = manifest.dependencies.managedServices.reduce((acc, svc) => {
-          acc.push(provisionOpenShift4Service(svc, provisionNamespaceInfo, user, dispatch));
-          return acc;
-        }, []);
-
-        return Promise.all(provisionTasks).then(svcsAttrs => {
-          if (!svcsAttrs) {
-            console.warn('service provision results are undefined');
-            return null;
-          }
-          console.log(`dispatching ${svcsAttrs.length} service provision results`, svcsAttrs);
-          svcsAttrs.forEach(svcAttrs =>
-            dispatch({
-              type: FULFILLED_ACTION(middlewareTypes.PROVISION_SERVICE),
-              payload: svcAttrs
-            })
-          );
-          dispatch(initCustomThreadSuccess(manifest));
-          return [user, manifest, walkthroughNs, svcsAttrs];
-        });
-      })
-      // Handle manifest templates
-      .then(([user, manifest, walkthroughNs, svcAttrs]) => {
-        if (!manifest || !manifest.dependencies || !manifest.dependencies.templates) {
-          console.log(`no templates found for walkthrough ${walkthroughName}`);
-          dispatch(initCustomThreadSuccess(manifest));
-          return Promise.resolve([user, manifest]);
-        }
-
-        const nsName = walkthroughNs.metadata.name;
-
-        const mergedAttrs = Object.assign(
-          {
-            'user-username': user.username,
-            'walkthrough-namespace': walkthroughNs.metadata.name
-          },
-          ...svcAttrs.map(a => a.additionalAttributes)
-        );
-
-        const templateTasks = manifest.dependencies.templates.map(rawTemplate => {
-          const template = parseTemplate(rawTemplate, mergedAttrs);
-          return processV4(nsName, template);
-        });
-        return Promise.all(templateTasks)
-          .then(() => svcAttrs)
-          .then(() => dispatch(initCustomThreadSuccess(manifest)));
-      })
-      .catch(e => dispatch(initCustomThreadFailure(e)))
-  );
 };
 
 /**
@@ -153,69 +53,10 @@ const prepareWalkthroughV4 = (dispatch, walkthroughName, attrs = {}) => {
  * @param {string} walkthoughName The identifier of the walkthrough to provision.
  */
 const prepareCustomWalkthroughNamespace = (dispatch, walkthoughName, attrs = {}) => {
-  if (window.OPENSHIFT_CONFIG.mockData) {
+
     dispatch(initCustomThreadSuccess({}));
     return Promise.resolve([]);
-  }
-  dispatch(initCustomThreadPending());
-  return initCustomThread(walkthoughName)
-    .then(res => res.data)
-    .then(manifest => {
-      dispatch(initCustomThreadPending(manifest));
-      currentUser().then(user => {
-        const userNamespace = buildValidProjectNamespaceName(user.username, walkthoughName);
-        const namespaceDisplayName = buildValidNamespaceDisplayName(user.username, walkthoughName);
-        const usersSharedNamespaceName = getUsersSharedNamespaceName(user.username);
-        const usersSharedNamespaceDisplayName = getUsersSharedNamespaceDisplayName(user.username);
-        const namespaceObj = namespaceResource({ name: userNamespace });
-        const namespaceRequestObj = namespaceRequestResource(namespaceDisplayName, { name: userNamespace });
 
-        return findOrCreateOpenshiftResource(
-          namespaceDef,
-          namespaceObj,
-          resObj => resObj.metadata.name === userNamespace,
-          namespaceRequestDef,
-          namespaceRequestObj
-        )
-          .then(() => {
-            if (!manifest || !manifest.dependencies || !manifest.dependencies.managedServices) {
-              return Promise.resolve([]);
-            }
-            return provisionManagedServiceSlices(dispatch, manifest.dependencies.managedServices, user.username, {
-              displayName: usersSharedNamespaceDisplayName,
-              name: usersSharedNamespaceName
-            });
-          })
-          .then(additionalAttrs => {
-            const mergedAttrs = Object.assign({}, attrs, ...additionalAttrs);
-            if (!manifest || !manifest.dependencies || !manifest.dependencies.serviceInstances) {
-              dispatch(initCustomThreadSuccess(manifest));
-              return Promise.resolve([]);
-            }
-
-            const siObjs = manifest.dependencies.serviceInstances.map(siPartial => {
-              const serviceInstance = Object.assign({}, DEFAULT_SERVICE_INSTANCE, siPartial);
-              return parseServiceInstanceTemplate(serviceInstance, mergedAttrs);
-            });
-
-            return Promise.all(
-              siObjs.map(siObj =>
-                findOrCreateOpenshiftResource(
-                  serviceInstanceDef(userNamespace),
-                  siObj,
-                  buildServiceInstanceCompareFn(siObj)
-                )
-              )
-            )
-              .then(() => watch(routeDef(userNamespace)))
-              .then(watchListener =>
-                watchListener.onEvent(handleResourceWatchEvent.bind(null, dispatch, walkthoughName))
-              )
-              .then(() => dispatch(initCustomThreadSuccess(manifest)));
-          });
-      });
-    })
-    .catch(e => dispatch(initCustomThreadFailure(e)));
 };
 
 // OpenShift 4 equivalent of #provisionManagedServiceSlices that handles a

@@ -141,64 +141,44 @@ const manageServicesV4 = (dispatch, user, manifest) => {
     payload: { provisioningUser: user.username }
   });
 
-  const sharedNamespaceName = getUsersSharedNamespaceName(user.username);
-  const sharedNamespaceDisplay = getUsersSharedNamespaceDisplayName(user.username);
-  const namespaceRes = namespaceResource({ name: sharedNamespaceName });
-  const namespaceRequestRes = namespaceRequestResource(sharedNamespaceDisplay, { name: sharedNamespaceName });
-  const nsCompareFn = n => n.metadata.name === sharedNamespaceName;
+  console.log(`Resolving the following services, ${toProvision.join(', ')}`);
+   const svcAttrs = toProvision.reduce((acc, svcName) => {
+     if (svcName === DEFAULT_SERVICES.FUSE) {
+       acc.push(provisionFuseOnlineV4(dispatch));
+     } else {
+       const { Host } = provisionedServices[svcName];
+       acc.push(
+         Object.assign(
+           {},
+           {
+             name: svcName,
+             status: SERVICE_STATUSES.PROVISIONED,
+             type: SERVICE_TYPES.PROVISIONED_SERVICE,
+             url: Host
+           }
+         )
+       );
+     }
+     return acc;
+   }, []);
 
-  return (
-    findOrCreateOpenshiftResource(namespaceDef, namespaceRes, nsCompareFn, namespaceRequestDef, namespaceRequestRes)
-      // Handle provisioning services
-      .then(ns => {
-        const nsName = ns.metadata.name;
-        console.log(`Shared namespace ${nsName} created`);
-        console.log(`Resolving the following services, ${toProvision.join(', ')}`);
-        const svcAttrs = toProvision.reduce((acc, svcName) => {
-          if (svcName === DEFAULT_SERVICES.FUSE) {
-            acc.push(provisionFuseOnlineV4(dispatch));
-          } else {
-            const { Host } = provisionedServices[svcName];
-            acc.push(
-              Object.assign(
-                {},
-                {
-                  name: svcName,
-                  status: SERVICE_STATUSES.PROVISIONED,
-                  type: SERVICE_TYPES.PROVISIONED_SERVICE,
-                  url: Host
-                }
-              )
-            );
-          }
-          return acc;
-        }, []);
-        console.log(`completed service resolution with ${svcAttrs.length} services`);
-        return Promise.all(svcAttrs);
-      })
-      // Handle dispatching provision results
-      .then(svcAttrs => {
-        if (!svcAttrs) {
-          console.warn('service provision results are undefined');
-        }
-        console.log(`dispatching ${svcAttrs.length} service provision results`);
-        svcAttrs.forEach(attrs =>
-          dispatch({
-            type: FULFILLED_ACTION(middlewareTypes.PROVISION_SERVICE),
-            payload: attrs
-          })
-        );
-      })
-      // Handle watching services
-      .then(() => {
-        const nsName = getUsersSharedNamespaceName(user.username);
-        WATCH_SERVICES.forEach(svcName => {
-          if (svcName === DEFAULT_SERVICES.ENMASSE) {
-            watchAMQOnline(dispatch, user.username, nsName);
-          }
-        });
-      })
-  );
+   console.log(`completed service resolution with ${svcAttrs.length} services`);
+
+  return (Promise.all(svcAttrs)
+          // Handle dispatching provision results
+            .then(svcAttrs => {
+              if (!svcAttrs) {
+                console.warn('service provision results are undefined');
+              }
+              console.log(`dispatching ${svcAttrs.length} service provision results`);
+              svcAttrs.forEach(attrs =>
+                dispatch({
+                  type: FULFILLED_ACTION(middlewareTypes.PROVISION_SERVICE),
+                  payload: attrs
+                })
+              );
+            }));
+
 };
 
 /**
